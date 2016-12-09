@@ -6,7 +6,7 @@ use nom::{be_i8, be_u8, be_u16, be_u32, IResult, ErrorKind};
 
 // Main Parser Entry Point /////////////////////////////////////////////////////
 
-pub fn parse_midi(input: &[u8]) -> Result<Midi, nom::Err<&[u8]>> {
+pub fn parse_midi(input: &[u8]) -> Result<Midi, ErrorKind> {
     match complete!(input, parse_file) {
         IResult::Done(_, midi) => Ok(midi),
         IResult::Error(e) => Err(e),
@@ -118,7 +118,7 @@ named!(event<&[u8], Event>,
       0xFF => map!(meta_event, |x| Event::Meta(dt, x)) |
       0xF0 => map!(sysex_event, |x| Event::Sysex(dt, x)) |
       0xF7 => map!(sysex_event, |x| Event::Sysex(dt, x)) |
-      0...255 => map!(midi_event, |x| Event::Midi(dt, x))
+      0x00...0xFF => map!(midi_event, |x| Event::Midi(dt, x))
     ) >>
     (event)
   )
@@ -128,12 +128,103 @@ named!(event<&[u8], Event>,
 // MIDI Events /////////////////////////////////////////////////////////////////
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct MidiEvent {
+pub enum MidiEvent {
+    NoteOn {
+        channel: u8,
+        number: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        channel: u8,
+        number: u8,
+        velocity: u8,
+    },
+    PolyphonicAftertouch {
+        channel: u8,
+        number: u8,
+        pressure: u8,
+    },
+    ChannelAftertouch {
+        channel: u8,
+        pressure: u8,
+    },
+    Control {
+        channel: u8,
+        change: ControlChange,
+    },
+    ProgramChange {
+        channel: u8,
+        program_number: u8,
+    },
+    PitchBend {
+        channel: u8,
+        pitch: u16,
+    },
+    Unknown(u8, u8, u8),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ControlChange {
+    Raw(u8, u8),
 }
 
 // TODO: THIS IS VERY WRONG, VERY BAD!
 named!(midi_event<&[u8], MidiEvent>,
-  preceded!(take!(1), value!(MidiEvent {}))
+  switch!(be_u8,
+      n@0x80...0x8F => do_parse!(
+          num: be_u8 >>
+          vel: be_u8 >>
+          (MidiEvent::NoteOff {
+              channel: n & 0x0F,
+              number: num,
+              velocity: vel,
+          })) |
+      n@0x90...0x9F => do_parse!(
+          num: be_u8 >>
+          vel: be_u8 >>
+          (MidiEvent::NoteOn {
+              channel: n & 0x0F,
+              number: num,
+              velocity: vel,
+          })) |
+      n@0xA0...0xAF => do_parse!(
+          num: be_u8 >>
+          pres: be_u8 >>
+          (MidiEvent::PolyphonicAftertouch {
+              channel: n & 0x0F,
+              number: num,
+              pressure: pres,
+          })) |
+      n@0xB0...0xBF => do_parse!(
+          control: take!(2) >>
+          (MidiEvent::Control {
+              channel: n & 0x0F,
+              change: ControlChange::Raw(control[0], control[1]),
+          })) |
+      n@0xC0...0xCF => do_parse!(
+          patch: be_u8 >>
+          (MidiEvent::ProgramChange {
+              channel: n & 0x0F,
+              program_number: patch,
+          })) |
+      n@0xD0...0xDF => do_parse!(
+          pres: be_u8 >>
+          (MidiEvent::ChannelAftertouch {
+              channel: n & 0x0F,
+              pressure: pres,
+          })) |
+      n@0xE0...0xEF => do_parse!(
+          lsb: be_u8 >>
+          msb: be_u8 >>
+          (MidiEvent::PitchBend {
+              channel: n & 0x0F,
+              pitch: (msb as u16) << 7 | lsb as u16,
+          }))
+      // n@0x00...0x7F => do_parse!(
+      //     second: be_u8 >>
+      //     third: be_u8 >>
+      //     (MidiEvent::Unknown(n, second, third)))
+  )
 );
 
 
@@ -333,7 +424,7 @@ pub fn var_length(input: &[u8]) -> IResult<&[u8], u32> {
             return IResult::Done(&input[i+1..], result);
         }
     }
-    IResult::Error(nom::Err::Code(ErrorKind::Custom(0)))
+    IResult::Error(ErrorKind::Custom(0))
 }
 
 macro_rules! hex {
