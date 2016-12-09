@@ -4,6 +4,17 @@ extern crate nom;
 use nom::{be_u8, be_u16, be_u32, IResult, ErrorKind};
 
 
+// Main Parser Entry Point /////////////////////////////////////////////////////
+
+pub fn parse_midi<'a>(input: &'a [u8]) -> Result<Midi<'a>, ErrorKind> {
+    match parse_file(input) {
+        IResult::Done(_, midi) => Ok(midi),
+        IResult::Error(e) => Err(e),
+        IResult::Incomplete(_) => unreachable!(),
+    }
+}
+
+
 // Midi Data Structures ////////////////////////////////////////////////////////
 
 #[derive(Debug)]
@@ -18,25 +29,6 @@ pub struct Header {
     format: u16,
     tracks: u16,
     division: u16,
-}
-
-#[derive(Debug)]
-pub struct MidiEvent {
-}
-
-#[derive(Debug)]
-pub struct MetaEvent<'a> {
-    kind: u8,
-    data: &'a [u8],
-}
-
-#[derive(Debug)]
-pub struct SysexEvent<'a> {
-    /// Set when parsing an F0 message, and unset on an F7 message
-    start: bool,
-    /// Set when the message ends with F7
-    end: bool,
-    data: &'a [u8],
 }
 
 #[derive(Debug)]
@@ -57,7 +49,7 @@ pub enum Chunk<'a> {
 }
 
 
-// Parsers /////////////////////////////////////////////////////////////////////
+// Midi Container Parsers //////////////////////////////////////////////////////
 
 named!(parse_file<&[u8], Midi>,
   do_parse!(
@@ -130,10 +122,26 @@ named!(event<&[u8], Event>,
   )
 );
 
-// THIS IS VERY WRONG, VERY BAD!
+
+// MIDI Events /////////////////////////////////////////////////////////////////
+
+#[derive(Debug)]
+pub struct MidiEvent {
+}
+
+// TODO: THIS IS VERY WRONG, VERY BAD!
 named!(midi_event<&[u8], MidiEvent>,
   preceded!(take!(2), value!(MidiEvent {}))
 );
+
+
+// Meta Events /////////////////////////////////////////////////////////////////
+
+#[derive(Debug)]
+pub struct MetaEvent<'a> {
+    kind: u8,
+    data: &'a [u8],
+}
 
 named!(meta_event<&[u8], MetaEvent>,
   do_parse!(
@@ -148,6 +156,18 @@ named!(meta_event<&[u8], MetaEvent>,
   )
 );
 
+
+// System Exclusive Events /////////////////////////////////////////////////////
+
+#[derive(Debug)]
+pub struct SysexEvent<'a> {
+    /// Set when parsing an F0 message, and unset on an F7 message
+    start: bool,
+    /// Set when the message ends with F7
+    end: bool,
+    data: &'a [u8],
+}
+
 named!(sysex_event<&[u8], SysexEvent>,
   do_parse!(
     kind: alt!(tag!([0xF0]) | tag!([0xF7])) >>
@@ -160,6 +180,9 @@ named!(sysex_event<&[u8], SysexEvent>,
     })
   )
 );
+
+
+// Utility Parsers /////////////////////////////////////////////////////////////
 
 pub fn var_length(input: &[u8]) -> IResult<&[u8], u32> {
     for i in 0..4 {
@@ -175,14 +198,8 @@ pub fn var_length(input: &[u8]) -> IResult<&[u8], u32> {
     IResult::Error(ErrorKind::Custom(0))
 }
 
-pub fn parse_midi<'a>(input: &'a [u8]) -> Result<Midi<'a>, ErrorKind> {
-    match parse_file(input) {
-        IResult::Done(_, midi) => Ok(midi),
-        IResult::Error(e) => Err(e),
-        IResult::Incomplete(_) => unreachable!(),
-    }
-}
-
+
+// Tests ///////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
 mod tests {
