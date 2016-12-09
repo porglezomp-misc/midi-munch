@@ -185,14 +185,15 @@ named!(sysex_event<&[u8], SysexEvent>,
 // Utility Parsers /////////////////////////////////////////////////////////////
 
 pub fn var_length(input: &[u8]) -> IResult<&[u8], u32> {
+    let mut result = 0;
     for i in 0..4 {
-        if input[i] & 0xF0 == 0 {
-            let mut result = 0;
-            for j in 0..i {
-                result <<= 8;
-                result |= input[j] as u32;
-            }
-            return IResult::Done(&input[i..], result);
+        if i >= input.len() {
+            return IResult::Incomplete(nom::Needed::Unknown);
+        }
+        result <<= 7;
+        result |= (input[i] & 0x7F) as u32;
+        if input[i] & 0x80 == 0 {
+            return IResult::Done(&input[i+1..], result);
         }
     }
     IResult::Error(ErrorKind::Custom(0))
@@ -202,8 +203,25 @@ pub fn var_length(input: &[u8]) -> IResult<&[u8], u32> {
 // Tests ///////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
+#[test]
+fn test_var_length() {
+    let cases = [
+        (0x______00, vec![0x00]),
+        (0x______40, vec![0x40]),
+        (0x______7F, vec![0x7F]),
+        (0x______80, vec![0x81, 0x00]),
+        (0x____2000, vec![0xC0, 0x00]),
+        (0x____3FFF, vec![0xFF, 0x7F]),
+        (0x____4000, vec![0x81, 0x80, 0x00]),
+        (0x__100000, vec![0xC0, 0x80, 0x00]),
+        (0x__1FFFFF, vec![0xFF, 0xFF, 0x7F]),
+        (0x__200000, vec![0x81, 0x80, 0x80, 0x00]),
+        (0x08000000, vec![0xC0, 0x80, 0x80, 0x00]),
+        (0x0FFFFFFF, vec![0xFF, 0xFF, 0xFF, 0x7F]),
+    ];
+
+    for &(number, ref bytes) in &cases {
+        println!("{:?} {}", bytes, number);
+        assert_eq!(var_length(&bytes[..]), IResult::Done(&b""[..], number));
     }
 }
