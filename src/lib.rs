@@ -82,7 +82,7 @@ named!(header<&[u8], Header>,
 fn chunk(input: &[u8]) -> IResult<&[u8], Option<Chunk>> {
     let (_, check) = try_parse!(input, opt!(tag!(b"MTrk")));
     if check.is_some() {
-        map!(input, complete!(track), |x| Some(Chunk::Track(x)))
+        map!(input, track, |x| Some(Chunk::Track(x)))
     } else {
         ignore(input)
     }
@@ -95,12 +95,20 @@ fn track(input: &[u8]) -> IResult<&[u8], TrackChunk> {
       data: take!(len) >>
       (data)
     ));
-    let (_, events) = try_parse!(data, do_parse!(
-        evts: many0!(event) >>
-        eof!() >>
-        (evts)
-    ));
-    // terminated!(, eof!())
+    let mut events = Vec::new();
+    let mut running_status = None;
+    let mut input = data;
+    loop {
+        match event(input, &mut running_status) {
+            IResult::Done(new_inp, item) => {
+                events.push(item);
+                input = new_inp;
+            }
+            IResult::Error(_) => break,
+            IResult::Incomplete(i) => return IResult::Incomplete(i),
+        }
+    }
+    try_parse!(input, eof!());
     IResult::Done(rest, TrackChunk {
         events: events,
     })
@@ -115,26 +123,26 @@ named!(ignore<&[u8], Option<Chunk> >,
   )
 );
 
-named!(event<&[u8], Event>,
-  do_parse!(
-    dt: var_length >>
-    event: dbg!(switch!(peek!(be_u8),
-      0xFF => map!(meta_event, |x| Event::Meta(dt, x)) |
-      0xF0 => map!(sysex_event, |x| Event::Sysex(dt, x)) |
-      0xF7 => map!(sysex_event, |x| Event::Sysex(dt, x)) |
-      0x80...0xEF => map!(midi_event, |x| Event::Midi(dt, x)) |
-      // Running-status messages don't begin with a type, so they don't have
-      // their high bit set. They should be parsed the same as the previous
-      // event type.
-      0x00...0x7F => do_parse!(
-          data0: u7 >>
-          data1: u7 >>
-          (Event::Midi(dt, MidiEvent::Previous(data0, data1)))
-      )
-    )) >>
-    (event)
-  )
-);
+fn event<'a>(input: &'a [u8], running_status: &mut Option<u8>) -> IResult<&'a [u8], Event<'a>> {
+    // Sysex events and meta events cancel any running status which was in
+    // effect. Running status does not apply to and may not be used for these
+    // messages.
+    let (input, dt) = try_parse!(input, complete!(var_length));
+    let (_, kind) = try_parse!(input, be_u8);
+    match kind {
+        0xFF => map!(input, meta_event, |x| Event::Meta(dt, x)),
+        0xF0 => map!(input, sysex_event, |x| Event::Sysex(dt, x)),
+        0xF7 => map!(input, sysex_event, |x| Event::Sysex(dt, x)),
+        0xF1...0xF6 | 0xF8...0xFE => unimplemented!(),
+        0x80...0xEF => map!(input, midi_event, |x| Event::Midi(dt, x)),
+        0x00...0x7F => do_parse!(input,
+            data0: u7 >>
+            data1: u7 >>
+            (Event::Midi(dt, MidiEvent::Previous(data0, data1)))
+        ),
+        _ => unreachable!(),
+    }
+}
 
 
 // MIDI Events /////////////////////////////////////////////////////////////////
@@ -452,11 +460,15 @@ pub fn var_length(input: &[u8]) -> IResult<&[u8], u32> {
     IResult::Error(ErrorKind::Custom(0))
 }
 
-named!(u7<&[u8], u8>,
-  switch!(be_u8,
-    n@0x00...0x7F => value!(n)
-  )
-);
+// TODO: Change back to a macro-based parser once switch! is fixed?
+fn u7(input: &[u8]) -> IResult<&[u8], u8> {
+    let (rest, x) = try_parse!(input, be_u8);
+    if x & 0x80 == 0 {
+        IResult::Done(rest, x)
+    } else {
+        IResult::Error(ErrorKind::Custom(7))
+    }
+}
 
 
 // Tests ///////////////////////////////////////////////////////////////////////
@@ -487,9 +499,9 @@ fn test_var_length() {
 #[cfg(test)]
 #[test]
 fn test_event() {
-    assert_eq!(event(&[0x00, 0xFF, 0x00, 0x02, 0x00, 0x01]),
+    assert_eq!(event(&[0x00, 0xFF, 0x00, 0x02, 0x00, 0x01], &mut None),
                IResult::Done(&b""[..], Event::Meta(0, MetaEvent::SequenceNumber(1))));
-    assert_eq!(event(&[0x00, 0xFF, 0x58, 0x04, 0x06, 0x03, 0x24, 0x08]),
+    assert_eq!(event(&[0x00, 0xFF, 0x58, 0x04, 0x06, 0x03, 0x24, 0x08], &mut None),
                IResult::Done(&b""[..], Event::Meta(0, MetaEvent::TimeSignature {
                    numerator: 6,
                    denominator: 3,
