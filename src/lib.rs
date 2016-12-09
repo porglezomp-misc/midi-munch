@@ -95,7 +95,11 @@ fn track(input: &[u8]) -> IResult<&[u8], TrackChunk> {
       data: take!(len) >>
       (data)
     ));
-    let (_, events) = try_parse!(data, many0!(event));
+    let (_, events) = try_parse!(data, do_parse!(
+        evts: many0!(event) >>
+        eof!() >>
+        (evts)
+    ));
     // terminated!(, eof!())
     IResult::Done(rest, TrackChunk {
         events: events,
@@ -113,13 +117,21 @@ named!(ignore<&[u8], Option<Chunk> >,
 
 named!(event<&[u8], Event>,
   do_parse!(
-    dt: dbg!(var_length) >>
-    event: switch!(peek!(be_u8),
+    dt: var_length >>
+    event: dbg!(switch!(peek!(be_u8),
       0xFF => map!(meta_event, |x| Event::Meta(dt, x)) |
       0xF0 => map!(sysex_event, |x| Event::Sysex(dt, x)) |
       0xF7 => map!(sysex_event, |x| Event::Sysex(dt, x)) |
-      0x80...0xEF => map!(midi_event, |x| Event::Midi(dt, x))
-    ) >>
+      0x80...0xEF => map!(midi_event, |x| Event::Midi(dt, x)) |
+      // Running-status messages don't begin with a type, so they don't have
+      // their high bit set. They should be parsed the same as the previous
+      // event type.
+      0x00...0x7F => do_parse!(
+          data0: u7 >>
+          data1: u7 >>
+          (Event::Midi(dt, MidiEvent::Previous(data0, data1)))
+      )
+    )) >>
     (event)
   )
 );
@@ -160,7 +172,10 @@ pub enum MidiEvent {
         channel: u8,
         pitch: u16,
     },
-    Unknown(u8, u8, u8),
+    /// Used to implement "running-status" messages. When a message is sent
+    /// without a type, it's interpreted as being the same as the previous
+    /// event.
+    Previous(u8, u8),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -168,10 +183,8 @@ pub enum ControlChange {
     Raw(u8, u8),
 }
 
-// TODO: Parse strings of MIDI events
 
-// 0x90 u7 u7 u7 u7 is a pair of 0x90 events, distinguishable because the high
-// bit isn't set, so it can't be a new event.
+// TODO: Fix parsing the running-status events.
 named!(midi_event<&[u8], MidiEvent>,
   switch!(be_u8,
       n@0x80...0x8F => do_parse!(
@@ -224,10 +237,6 @@ named!(midi_event<&[u8], MidiEvent>,
               channel: n & 0x0F,
               pitch: (msb as u16) << 7 | lsb as u16,
           }))
-      // n@0x00...0x7F => do_parse!(
-      //     second: be_u8 >>
-      //     third: be_u8 >>
-      //     (MidiEvent::Unknown(n, second, third)))
   )
 );
 
