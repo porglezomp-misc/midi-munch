@@ -118,7 +118,7 @@ named!(event<&[u8], Event>,
       0xFF => map!(meta_event, |x| Event::Meta(dt, x)) |
       0xF0 => map!(sysex_event, |x| Event::Sysex(dt, x)) |
       0xF7 => map!(sysex_event, |x| Event::Sysex(dt, x)) |
-      0x00...0xFF => map!(midi_event, |x| Event::Midi(dt, x))
+      0x80...0xEF => map!(midi_event, |x| Event::Midi(dt, x))
     ) >>
     (event)
   )
@@ -168,54 +168,58 @@ pub enum ControlChange {
     Raw(u8, u8),
 }
 
-// TODO: THIS IS VERY WRONG, VERY BAD!
+// TODO: Parse strings of MIDI events
+
+// 0x90 u7 u7 u7 u7 is a pair of 0x90 events, distinguishable because the high
+// bit isn't set, so it can't be a new event.
 named!(midi_event<&[u8], MidiEvent>,
   switch!(be_u8,
       n@0x80...0x8F => do_parse!(
-          num: be_u8 >>
-          vel: be_u8 >>
+          num: u7 >>
+          vel: u7 >>
           (MidiEvent::NoteOff {
               channel: n & 0x0F,
               number: num,
               velocity: vel,
           })) |
       n@0x90...0x9F => do_parse!(
-          num: be_u8 >>
-          vel: be_u8 >>
+          num: u7 >>
+          vel: u7 >>
           (MidiEvent::NoteOn {
               channel: n & 0x0F,
               number: num,
               velocity: vel,
           })) |
       n@0xA0...0xAF => do_parse!(
-          num: be_u8 >>
-          pres: be_u8 >>
+          num: u7 >>
+          pres: u7 >>
           (MidiEvent::PolyphonicAftertouch {
               channel: n & 0x0F,
               number: num,
               pressure: pres,
           })) |
       n@0xB0...0xBF => do_parse!(
-          control: take!(2) >>
+          controller: u7 >>
+          value: u7 >>
           (MidiEvent::Control {
               channel: n & 0x0F,
-              change: ControlChange::Raw(control[0], control[1]),
+              change: ControlChange::Raw(controller, value),
           })) |
       n@0xC0...0xCF => do_parse!(
-          patch: be_u8 >>
+          patch: u7 >>
           (MidiEvent::ProgramChange {
               channel: n & 0x0F,
               program_number: patch,
           })) |
       n@0xD0...0xDF => do_parse!(
-          pres: be_u8 >>
+          pres: u7 >>
           (MidiEvent::ChannelAftertouch {
               channel: n & 0x0F,
               pressure: pres,
           })) |
       n@0xE0...0xEF => do_parse!(
-          lsb: be_u8 >>
-          msb: be_u8 >>
+          lsb: u7 >>
+          msb: u7 >>
           (MidiEvent::PitchBend {
               channel: n & 0x0F,
               pitch: (msb as u16) << 7 | lsb as u16,
@@ -310,7 +314,10 @@ impl From<u8> for TextType {
 named!(meta_event<&[u8], MetaEvent>,
   preceded!(tag!([0xFF]),
     switch!(be_u8,
-      0x00 => map!(preceded!(tag!([0x02]), be_u16), MetaEvent::SequenceNumber) |
+      0x00 => do_parse!(
+          tag!([0x02]) >>
+          seq: be_u16 >>
+          (MetaEvent::SequenceNumber(seq))) |
       kind@0x01...0x0F => do_parse!(
           len: var_length >>
           data: take!(len) >>
@@ -318,11 +325,20 @@ named!(meta_event<&[u8], MetaEvent>,
               kind: TextType::from(kind),
               text: data,
           })) |
-      0x20 => map!(preceded!(tag!([0x01]), be_u8), MetaEvent::ChannelPrefix) |
-      0x2F => preceded!(tag!([0x00]), value!(MetaEvent::EndOfTrack)) |
-      0x51 => map!(preceded!(tag!([0x03]), take!(3)), |b: &[u8]| {
-          MetaEvent::SetTempo((b[0] as u32) << 16 | (b[1] as u32) << 8 | b[0] as u32)
-      }) |
+      0x20 => do_parse!(
+          tag!([0x01]) >>
+          prefix: be_u8 >>
+          (MetaEvent::ChannelPrefix(prefix))) |
+      0x2F => do_parse!(
+          tag!([0x00]) >>
+          (MetaEvent::EndOfTrack)) |
+      0x51 => do_parse!(
+          tag!([0x03]) >>
+          b: take!(3) >>
+          ({
+              let t = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[0] as u32;
+              MetaEvent::SetTempo(t)
+          })) |
       0x54 => do_parse!(
           tag!([0x05]) >>
           hr: be_u8 >>
@@ -427,11 +443,11 @@ pub fn var_length(input: &[u8]) -> IResult<&[u8], u32> {
     IResult::Error(ErrorKind::Custom(0))
 }
 
-macro_rules! hex {
-    [$($t:tt)*] => {
-        [$(concat_idents!(0x0, $t)),*]
-    }
-}
+named!(u7<&[u8], u8>,
+  switch!(be_u8,
+    n@0x00...0x7F => value!(n)
+  )
+);
 
 
 // Tests ///////////////////////////////////////////////////////////////////////
@@ -472,3 +488,14 @@ fn test_event() {
                    notated_divisions: 8,
                })));
 }
+
+// let data = [
+//     0x00,
+//     0xF0, 0x03, 0x43, 0x12, 0x00,
+//     0x81, 0x48,
+//     0xF7, 0x06, 0x43, 0x12, 0x00, 0x43, 0x12, 0x00,
+//     0x64,
+//     0xF7, 0x04, 0x43, 0x12, 0x00, 0xF7,
+// ];
+// let res: IResult<&[u8], Event> = event(data);
+// assert_eq!(res.output().unwrap(), )
