@@ -1,3 +1,5 @@
+// Copyright (c) 2016 by Caleb Jones <code@calebjones.net>
+
 #[macro_use]
 extern crate nom;
 
@@ -130,16 +132,35 @@ fn event<'a>(input: &'a [u8], running_status: &mut Option<u8>) -> IResult<&'a [u
     let (input, dt) = try_parse!(input, complete!(var_length));
     let (_, kind) = try_parse!(input, be_u8);
     match kind {
-        0xFF => map!(input, meta_event, |x| Event::Meta(dt, x)),
-        0xF0 => map!(input, sysex_event, |x| Event::Sysex(dt, x)),
-        0xF7 => map!(input, sysex_event, |x| Event::Sysex(dt, x)),
+        0xFF => {
+            *running_status = None;
+            map!(input, meta_event, |x| Event::Meta(dt, x))
+        }
+        0xF0 => {
+            *running_status = None;
+            map!(input, sysex_event, |x| Event::Sysex(dt, x))
+        }
+        0xF7 => {
+            *running_status = None;
+            map!(input, sysex_event, |x| Event::Sysex(dt, x))
+        }
         0xF1...0xF6 | 0xF8...0xFE => unimplemented!(),
-        0x80...0xEF => map!(input, midi_event, |x| Event::Midi(dt, x)),
-        0x00...0x7F => do_parse!(input,
-            data0: u7 >>
-            data1: u7 >>
-            (Event::Midi(dt, MidiEvent::Previous(data0, data1)))
-        ),
+        n@0x80...0xEF => {
+            *running_status = Some(n);
+            do_parse!(input,
+              prefix: be_u8 >>
+              event: call!(midi_event, prefix) >>
+              (Event::Midi(dt, event))
+            )
+        }
+        0x00...0x7F => match *running_status {
+            Some(n@0x80...0xEF) =>
+                do_parse!(input,
+                event: call!(midi_event, n) >>
+                (Event::Midi(dt, event))),
+            Some(_) => IResult::Error(ErrorKind::Custom(2)),
+            None => IResult::Error(ErrorKind::Custom(3)),
+        },
         _ => unreachable!(),
     }
 }
@@ -193,60 +214,61 @@ pub enum ControlChange {
 
 
 // TODO: Fix parsing the running-status events.
-named!(midi_event<&[u8], MidiEvent>,
-  switch!(be_u8,
-      n@0x80...0x8F => do_parse!(
+fn midi_event(input: &[u8], prefix: u8) -> IResult<&[u8], MidiEvent> {
+    match prefix {
+        n@0x80...0x8F => do_parse!(input,
           num: u7 >>
           vel: u7 >>
           (MidiEvent::NoteOff {
               channel: n & 0x0F,
               number: num,
               velocity: vel,
-          })) |
-      n@0x90...0x9F => do_parse!(
+          })),
+        n@0x90...0x9F => do_parse!(input,
           num: u7 >>
           vel: u7 >>
           (MidiEvent::NoteOn {
               channel: n & 0x0F,
               number: num,
               velocity: vel,
-          })) |
-      n@0xA0...0xAF => do_parse!(
+          })),
+        n@0xA0...0xAF => do_parse!(input,
           num: u7 >>
           pres: u7 >>
           (MidiEvent::PolyphonicAftertouch {
               channel: n & 0x0F,
               number: num,
               pressure: pres,
-          })) |
-      n@0xB0...0xBF => do_parse!(
+          })),
+        n@0xB0...0xBF => do_parse!(input,
           controller: u7 >>
           value: u7 >>
           (MidiEvent::Control {
               channel: n & 0x0F,
               change: ControlChange::Raw(controller, value),
-          })) |
-      n@0xC0...0xCF => do_parse!(
+          })),
+        n@0xC0...0xCF => do_parse!(input,
           patch: u7 >>
           (MidiEvent::ProgramChange {
               channel: n & 0x0F,
               program_number: patch,
-          })) |
-      n@0xD0...0xDF => do_parse!(
+          })),
+        n@0xD0...0xDF => do_parse!(input,
           pres: u7 >>
           (MidiEvent::ChannelAftertouch {
               channel: n & 0x0F,
               pressure: pres,
-          })) |
-      n@0xE0...0xEF => do_parse!(
+          })),
+        n@0xE0...0xEF => do_parse!(input,
           lsb: u7 >>
           msb: u7 >>
           (MidiEvent::PitchBend {
               channel: n & 0x0F,
               pitch: (msb as u16) << 7 | lsb as u16,
-          }))
-  )
-);
+          })),
+        _ => IResult::Error(ErrorKind::Custom(1))
+  }
+}
 
 
 // Meta Events /////////////////////////////////////////////////////////////////
@@ -460,15 +482,11 @@ pub fn var_length(input: &[u8]) -> IResult<&[u8], u32> {
     IResult::Error(ErrorKind::Custom(0))
 }
 
-// TODO: Change back to a macro-based parser once switch! is fixed?
-fn u7(input: &[u8]) -> IResult<&[u8], u8> {
-    let (rest, x) = try_parse!(input, be_u8);
-    if x & 0x80 == 0 {
-        IResult::Done(rest, x)
-    } else {
-        IResult::Error(ErrorKind::Custom(7))
-    }
-}
+named!(u7<&[u8], u8>,
+  switch!(be_u8,
+    n@0x00...0x7F => value!(n)
+  )
+);
 
 
 // Tests ///////////////////////////////////////////////////////////////////////
