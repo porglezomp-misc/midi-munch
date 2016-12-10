@@ -3,5 +3,7 @@ name = "midi"
 version = "0.1.0"
 authors = ["Caleb Jones <code@calebjones.net>"]
 
-[dependencies]
-nom = "^2.0"
+[dependencies.nom]
+version = "^2.0"
+git = "https://github.com/porglezomp-misc/nom.git"
+rev = "2d690c0"
